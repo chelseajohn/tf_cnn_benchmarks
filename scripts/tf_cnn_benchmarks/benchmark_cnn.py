@@ -787,7 +787,8 @@ def create_config_proto(params):
     rewrite_options.scoped_allocator_opts.enable_op.append('CollectiveReduce')
   if params.variable_update == 'horovod':
     import horovod.tensorflow as hvd  # pylint: disable=g-import-not-at-top
-    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    # config.gpu_options.visible_device_list = str(hvd.local_rank()) # Horovod_local_rank is broken
+    config.gpu_options.visible_device_list = os.environ["OMPI_COMM_WORLD_LOCAL_RANK"]
   # For collective_all_reduce, ignore all devices except current worker.
   if params.variable_update == 'collective_all_reduce':
     del config.device_filters[:]
