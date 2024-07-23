@@ -25,7 +25,7 @@ import numpy as np
 import tensorflow.compat.v1 as tf
 
 # pylint: disable=g-direct-tensorflow-import
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import ops, tensor_conversion_registry
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import data_flow_ops
@@ -314,7 +314,9 @@ class StagedModelVariable(object):
       return self._value()
 
 
-ops.register_tensor_conversion_function(
+# ops.register_tensor_conversion_function(
+#     StagedModelVariable, StagedModelVariable._TensorConversionFunction)  # pylint: disable=protected-access
+tensor_conversion_registry.register_tensor_conversion_function(
     StagedModelVariable, StagedModelVariable._TensorConversionFunction)  # pylint: disable=protected-access
 
 

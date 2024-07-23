@@ -31,7 +31,7 @@ import re
 import threading
 import time
 import traceback
-
+import datetime
 from absl import flags as absl_flags
 import numpy as np
 
@@ -61,6 +61,17 @@ from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.platform import gfile
 from tensorflow.python.util import nest
 
+
+
+if os.getenv("HOSTNAME") == "jrc0851.jureca"  or os.getenv("HOSTNAME") == "jrc0850.jureca":
+  # Energy measurement using rsmi for rocm
+  from get_power_rsmi import  power_loop
+  from get_power_rsmi import GetPower
+  gpu_name = "AMD"
+else:
+  # Energy measurement using nvidia-smi
+  from get_power_nvidia import GetPower
+  gpu_name = "NVIDIA"
 
 _DEFAULT_NUM_BATCHES = 100
 
@@ -707,6 +718,7 @@ class GlobalStepWatcher(threading.Thread):
         tf.logging.info('Starting real work at step %s at time %s' %
                         (global_step_val, time.ctime()))
         self.start_time = time.perf_counter()
+    
         self.start_step = global_step_val
       if self.finish_time == 0 and global_step_val >= self.end_at_global_step:
         tf.logging.info('Finishing real work at step %s at time %s' %
@@ -788,7 +800,10 @@ def create_config_proto(params):
   if params.variable_update == 'horovod':
     import horovod.tensorflow as hvd  # pylint: disable=g-import-not-at-top
     # config.gpu_options.visible_device_list = str(hvd.local_rank()) # Horovod_local_rank is broken
-    config.gpu_options.visible_device_list = os.environ["OMPI_COMM_WORLD_LOCAL_RANK"]
+    if  os.environ["SYSTEMNAME"] == 'jedi':
+      config.gpu_options.visible_device_list = os.environ["SLURM_LOCALID"]
+    else:
+      config.gpu_options.visible_device_list = os.environ["OMPI_COMM_WORLD_LOCAL_RANK"]
   # For collective_all_reduce, ignore all devices except current worker.
   if params.variable_update == 'collective_all_reduce':
     del config.device_filters[:]
@@ -946,6 +961,7 @@ def get_perf_timing_str(speed_mean, speed_uncertainty, speed_jitter, scale=1):
 def get_perf_timing(batch_size, step_train_times, ewma_alpha=None, scale=1):
   """Calculate benchmark processing speed."""
   times = np.array(step_train_times)
+  # print(times,type(times))
   speeds = batch_size / times
   if ewma_alpha:
     weights = np.logspace(len(times)-1, 0, len(times), base=1-ewma_alpha)
@@ -2395,101 +2411,120 @@ class BenchmarkCNN(object):
     accuracy_at_1 = None
     accuracy_at_5 = None
     last_eval_step = local_step
-    loop_start_time = time.perf_counter()
-    last_average_loss = None
-    while not done_fn():
-      if local_step == 0:
-        log_fn('Done warm up')
-        if graph_info.execution_barrier:
-          log_fn('Waiting for other replicas to finish warm up')
-          sess.run([graph_info.execution_barrier])
-
-        # TODO(laigd): rename 'Img' to maybe 'Input'.
-        header_str = ('Step\tImg/sec\t' +
-                      self.params.loss_type_to_report.replace('/', ' '))
-        if self.params.print_training_accuracy or self.params.forward_only:
-          # TODO(laigd): use the actual accuracy op names of the model.
-          header_str += '\ttop_1_accuracy\ttop_5_accuracy'
-        log_fn(header_str)
-        assert len(step_train_times) == self.num_warmup_batches
-        # reset times to ignore warm up batch
-        step_train_times = []
-        loop_start_time = time.perf_counter()
-      if (summary_writer and
-          (local_step + 1) % self.params.save_summaries_steps == 0):
-        fetch_summary = graph_info.summary_op
-      else:
-        fetch_summary = None
-      collective_graph_key = 7 if (
-          self.params.variable_update == 'collective_all_reduce') else 0
-      (summary_str, last_average_loss) = benchmark_one_step(
-          sess, graph_info.fetches, local_step,
-          self.batch_size * (self.num_workers
-                             if self.single_session else 1), step_train_times,
-          self.trace_filename, self.params.partitioned_graph_file_prefix,
-          profiler, image_producer, self.params, fetch_summary,
-          benchmark_logger=self.benchmark_logger,
-          collective_graph_key=collective_graph_key,
-          should_output_files=(self.params.variable_update != 'horovod' or
-                               is_chief))
-      if summary_str is not None and is_chief:
-        supervisor.summary_computed(sess, summary_str)
-      local_step += 1
-      if (self.params.save_model_steps and
-          local_step % self.params.save_model_steps == 0 and
-          local_step > 0 and
-          is_chief):
-        supervisor.saver.save(sess, supervisor.save_path,
-                              supervisor.global_step)
-      if (eval_graph_info and local_step > 0 and not done_fn() and
-          self._should_eval_during_training(local_step)):
-        python_global_step = sess.run(graph_info.global_step)
-        num_steps_since_last_eval = local_step - last_eval_step
-        # The INPUT_SIZE tag value might not match the
-        # PREPROC_NUM_TRAIN_EXAMPLES tag value, because the number of examples
-        # run, which is INPUT_SIZE, is rounded up to the nearest multiple of
-        # self.batch_size.
-        mlperf.logger.log(
-            key=mlperf.tags.INPUT_SIZE,
-            value=num_steps_since_last_eval * self.batch_size)
-        log_fn('Running evaluation at global_step {}'.format(
-            python_global_step))
-        accuracy_at_1, accuracy_at_5 = self._eval_once(
-            sess, summary_writer, eval_graph_info.fetches,
-            eval_graph_info.summary_op, eval_image_producer,
-            python_global_step)
-        last_eval_step = local_step
-        if (self.params.stop_at_top_1_accuracy and
-            accuracy_at_1 >= self.params.stop_at_top_1_accuracy):
-          log_fn('Stopping, as eval accuracy at least %s was reached' %
-                 self.params.stop_at_top_1_accuracy)
+    with GetPower() as training_scope:
+      loop_start_time = time.perf_counter()
+      loop_warmup_start = loop_start_time
+      loop_warmup_start_time = datetime.datetime.now()
+      last_average_loss = None
+      
+      while not done_fn():
+        if local_step == 0:
+          loop_warmup_end = time.perf_counter()
+          loop_warmup_end_time = datetime.datetime.now()
+          log_fn('-' * 64)
+          log_fn('loop warmup start at: %s' % loop_warmup_start)
+          log_fn('loop warmup end at: %s' % loop_warmup_end)
+          print(f'loop_warmup_start_time: {loop_warmup_start_time}')
+          print(f'loop_warmup_end_time: {loop_warmup_end_time}')
+          log_fn('Warmup time(sec): %s' %(loop_warmup_end - loop_warmup_start))
+          log_fn('-' * 64)
+          
+          if graph_info.execution_barrier:
+            log_fn('Waiting for other replicas to finish warm up')
+            sess.run([graph_info.execution_barrier])
+            
+          # TODO(laigd): rename 'Img' to maybe 'Input'.
+          header_str = ('Step\tImg/sec\t' +
+                        self.params.loss_type_to_report.replace('/', ' '))
+          
+          if self.params.print_training_accuracy or self.params.forward_only:
+            # TODO(laigd): use the actual accuracy op names of the model.
+            header_str += '\ttop_1_accuracy\ttop_5_accuracy'
+            
+          log_fn(header_str)
+          
+          assert len(step_train_times) == self.num_warmup_batches
+          
+          # reset times to ignore warm up batch
+          step_train_times = []
+          loop_start_time = time.perf_counter()
+          loop_train_start_time = datetime.datetime.now()
+        if (summary_writer and
+            (local_step + 1) % self.params.save_summaries_steps == 0):
+          fetch_summary = graph_info.summary_op
+        else:
+          fetch_summary = None
+        collective_graph_key = 7 if (
+            self.params.variable_update == 'collective_all_reduce') else 0
+        (summary_str, last_average_loss) = benchmark_one_step(
+            sess, graph_info.fetches, local_step,
+            self.batch_size * (self.num_workers
+                              if self.single_session else 1), step_train_times,
+            self.trace_filename, self.params.partitioned_graph_file_prefix,
+            profiler, image_producer, self.params, fetch_summary,
+            benchmark_logger=self.benchmark_logger,
+            collective_graph_key=collective_graph_key,
+            should_output_files=(self.params.variable_update != 'horovod' or
+                                is_chief))
+        if summary_str is not None and is_chief:
+          supervisor.summary_computed(sess, summary_str)
+        local_step += 1
+        if (self.params.save_model_steps and
+            local_step % self.params.save_model_steps == 0 and
+            local_step > 0 and
+            is_chief):
+          supervisor.saver.save(sess, supervisor.save_path,
+                                supervisor.global_step)
+        if (eval_graph_info and local_step > 0 and not done_fn() and
+            self._should_eval_during_training(local_step)):
+          python_global_step = sess.run(graph_info.global_step)
+          num_steps_since_last_eval = local_step - last_eval_step
+          # The INPUT_SIZE tag value might not match the
+          # PREPROC_NUM_TRAIN_EXAMPLES tag value, because the number of examples
+          # run, which is INPUT_SIZE, is rounded up to the nearest multiple of
+          # self.batch_size.
+          mlperf.logger.log(
+              key=mlperf.tags.INPUT_SIZE,
+              value=num_steps_since_last_eval * self.batch_size)
+          log_fn('Running evaluation at global_step {}'.format(
+              python_global_step))
+          accuracy_at_1, accuracy_at_5 = self._eval_once(
+              sess, summary_writer, eval_graph_info.fetches,
+              eval_graph_info.summary_op, eval_image_producer,
+              python_global_step)
+          last_eval_step = local_step
+          if (self.params.stop_at_top_1_accuracy and
+              accuracy_at_1 >= self.params.stop_at_top_1_accuracy):
+            log_fn('Stopping, as eval accuracy at least %s was reached' %
+                  self.params.stop_at_top_1_accuracy)
+            skip_final_eval = True
+            break
+          else:
+            log_fn('Resuming training')
+        if eval_graph_info and self.model.reached_target():
+          log_fn('Stopping, as the model indicates its custom goal was reached')
           skip_final_eval = True
           break
-        else:
-          log_fn('Resuming training')
-      if eval_graph_info and self.model.reached_target():
-        log_fn('Stopping, as the model indicates its custom goal was reached')
-        skip_final_eval = True
-        break
-    loop_end_time = time.perf_counter()
-    # Waits for the global step to be done, regardless of done_fn.
-    if global_step_watcher:
-      while not global_step_watcher.done():
-        time.sleep(.25)
-    if not global_step_watcher:
-      elapsed_time = loop_end_time - loop_start_time
-      average_wall_time = elapsed_time / local_step if local_step > 0 else 0
-      images_per_sec = (self.num_workers * local_step * self.batch_size /
-                        elapsed_time)
-      num_steps = local_step * self.num_workers
-    else:
-      # NOTE: Each worker independently increases the global step. So,
-      # num_steps will be the sum of the local_steps from each worker.
-      num_steps = global_step_watcher.num_steps()
-      elapsed_time = global_step_watcher.elapsed_time()
-      average_wall_time = (elapsed_time * self.num_workers / num_steps
-                           if num_steps > 0 else 0)
-      images_per_sec = num_steps * self.batch_size / elapsed_time
+      loop_end_time = time.perf_counter()
+      loop_train_end_time = datetime.datetime.now()
+      # Waits for the global step to be done, regardless of done_fn.
+      if global_step_watcher:
+        while not global_step_watcher.done():
+          time.sleep(.25)
+      if not global_step_watcher:
+        elapsed_time = loop_end_time - loop_start_time
+        average_wall_time = elapsed_time / local_step if local_step > 0 else 0
+        images_per_sec = (self.num_workers * local_step * self.batch_size /
+                          elapsed_time)
+        num_steps = local_step * self.num_workers
+      else:
+        # NOTE: Each worker independently increases the global step. So,
+        # num_steps will be the sum of the local_steps from each worker.
+        num_steps = global_step_watcher.num_steps()
+        elapsed_time = global_step_watcher.elapsed_time()
+        average_wall_time = (elapsed_time * self.num_workers / num_steps
+                            if num_steps > 0 else 0)
+        images_per_sec = num_steps * self.batch_size / elapsed_time
 
     # We skip printing images/sec if --eval_during_training_* is specified,
     # because we are both processing training and evaluation images, so a
@@ -2498,6 +2533,12 @@ class BenchmarkCNN(object):
       log_fn('-' * 64)
       # TODO(laigd): rename 'images' to maybe 'inputs'.
       log_fn('total images/sec: %.2f' % images_per_sec)
+      log_fn('-' * 64)
+      log_fn('loop train start at: %s' % loop_start_time)
+      log_fn('loop train end at: %s' % loop_end_time)
+      print(f'loop_train_start_time: {loop_train_start_time}')
+      print(f'loop_train_end_time: {loop_train_end_time}')
+      log_fn('training_elapsed_time(sec): %.2f' % elapsed_time)
       log_fn('-' * 64)
     else:
       log_fn('Done with training')
@@ -2552,6 +2593,24 @@ class BenchmarkCNN(object):
                     accuracy_at_1 >= self.params.stop_at_top_1_accuracy))
     mlperf.logger.log(key=mlperf.tags.RUN_STOP, value={'success': success})
     mlperf.logger.log(key=mlperf.tags.RUN_FINAL)
+    
+    log_fn('-' * 64)  
+    
+    if gpu_name == "NVIDIA":
+        # print("GPU O",training_scope.df.groupby('index').get_group(0))
+        training_scope.df.to_csv('energy-nvidia.csv')
+        print("Riemann energy",training_scope.energy())
+        
+    else:
+        ### AMD
+        training_scope.df.to_csv('energy-amd.csv')
+        print("Energy-per-GPU-list:")
+        energy_int,energy_cnt = training_scope.energy()
+        print(f"integrated: {energy_int}")
+        print(f"from counter: {energy_cnt}")
+      
+    log_fn('-' * 64)
+    
     return stats
 
   def _should_eval_during_training(self, step):
