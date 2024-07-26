@@ -62,16 +62,27 @@ from tensorflow.python.platform import gfile
 from tensorflow.python.util import nest
 
 
+# from jpwr.ctxmgr import get_power as GetPower
 
-if os.getenv("HOSTNAME") == "jrc0851.jureca"  or os.getenv("HOSTNAME") == "jrc0850.jureca":
+# if os.getenv("HOSTNAME") == "jrc0851.jureca"  or os.getenv("HOSTNAME") == "jrc0850.jureca":
+if os.getenv("ACCELERATOR") == "MI250":
   # Energy measurement using rsmi for rocm
   from get_power_rsmi import  power_loop
   from get_power_rsmi import GetPower
   gpu_name = "AMD"
+  
+  # from jpwr.gpu.rocm import power as power_rocm
+  # method_list = [power_rocm()]
+  
 else:
   # Energy measurement using nvidia-smi
   from get_power_nvidia import GetPower
   gpu_name = "NVIDIA"
+  
+  # from jpwr.sys.gh import power as power_gh 
+  # from jpwr.gpu.pynvml import power as power_pynvml
+  # method_list = [power_pynvml(), power_gh()]
+
 
 _DEFAULT_NUM_BATCHES = 100
 
@@ -2411,6 +2422,7 @@ class BenchmarkCNN(object):
     accuracy_at_1 = None
     accuracy_at_5 = None
     last_eval_step = local_step
+    # with GetPower(method_list, 100) as training_scope:
     with GetPower() as training_scope:
       loop_start_time = time.perf_counter()
       loop_warmup_start = loop_start_time
@@ -2608,7 +2620,13 @@ class BenchmarkCNN(object):
         energy_int,energy_cnt = training_scope.energy()
         print(f"integrated: {energy_int}")
         print(f"from counter: {energy_cnt}")
-      
+        
+    # energy_df, energy_additional = training_scope.energy()
+    # for k,v in energy_additional.items():
+    #     v.to_csv(f"{k}_{gpu_name}.csv")
+    # energy_df.to_csv(f'energy_{gpu_name}.csv')
+    # training_scope.df.to_csv(f'power_{gpu_name}.csv')
+    # print(f"Energy {gpu_name}: \n {energy_df}")
     log_fn('-' * 64)
     
     return stats
