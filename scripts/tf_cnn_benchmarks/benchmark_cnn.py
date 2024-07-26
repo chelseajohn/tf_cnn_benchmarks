@@ -63,8 +63,6 @@ from tensorflow.python.util import nest
 
 
 # from jpwr.ctxmgr import get_power as GetPower
-
-# if os.getenv("HOSTNAME") == "jrc0851.jureca"  or os.getenv("HOSTNAME") == "jrc0850.jureca":
 if os.getenv("ACCELERATOR") == "MI250":
   # Energy measurement using rsmi for rocm
   from get_power_rsmi import  power_loop
