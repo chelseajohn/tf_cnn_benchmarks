@@ -2608,14 +2608,14 @@ class BenchmarkCNN(object):
     
     if gpu_name == "NVIDIA":
         training_scope.df.to_csv('energy-nvidia.csv')
-        print(f"Energy-per-GPU-list integrated: {training_scope.energy()}")
+        print(f"Energy-per-GPU-list integrated(Wh): {training_scope.energy()}")
         
     else:
         ### AMD
         training_scope.df.to_csv('energy-amd.csv')
         energy_int,energy_cnt = training_scope.energy()
-        print(f"Energy-per-GPU-list integrated: {energy_int}")
-        print(f"Energy-per-GPU-list from counter: {energy_cnt}")
+        print(f"Energy-per-GPU-list integrated(Wh): {energy_int}")
+        print(f"Energy-per-GPU-list from counter(Wh): {energy_cnt}")
         
     # energy_df, energy_additional = training_scope.energy()
     # for k,v in energy_additional.items():
