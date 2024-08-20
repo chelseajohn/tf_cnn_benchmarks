@@ -47,6 +47,7 @@ import flags
 import mlperf
 import variable_mgr
 import variable_mgr_util
+import unicodedata
 from cnn_util import log_fn
 from models import model_config
 from platforms import util as platforms_util
@@ -61,25 +62,21 @@ from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.platform import gfile
 from tensorflow.python.util import nest
 
-
-# from jpwr.ctxmgr import get_power as GetPower
-if os.getenv("ACCELERATOR") == "MI250":
-  # Energy measurement using rsmi for rocm
-  from get_power_rsmi import  power_loop
-  from get_power_rsmi import GetPower
-  gpu_name = "AMD"
-  
-  # from jpwr.gpu.rocm import power as power_rocm
-  # method_list = [power_rocm()]
-  
-else:
-  # Energy measurement using nvidia-smi
-  from get_power_nvidia import GetPower
-  gpu_name = "NVIDIA"
-  
-  # from jpwr.sys.gh import power as power_gh 
-  # from jpwr.gpu.pynvml import power as power_pynvml
-  # method_list = [power_pynvml(), power_gh()]
+def slugify(value, allow_unicode=False):
+    """
+    Taken from https://github.com/django/django/blob/master/django/utils/text.py
+    Convert to ASCII if 'allow_unicode' is False. Convert spaces or repeated
+    dashes to single dashes. Remove characters that aren't alphanumerics,
+    underscores, or hyphens. Convert to lowercase. Also strip leading and
+    trailing whitespace, dashes, and underscores.
+    """
+    value = str(value)
+    if allow_unicode:
+        value = unicodedata.normalize('NFKC', value)
+    else:
+        value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')
+    value = re.sub(r'[^\w\s-]', '', value.lower())
+    return re.sub(r'[-\s]+', '-', value).strip('-_')
 
 
 _DEFAULT_NUM_BATCHES = 100
@@ -2420,8 +2417,24 @@ class BenchmarkCNN(object):
     accuracy_at_1 = None
     accuracy_at_5 = None
     last_eval_step = local_step
-    # with GetPower(method_list, 100) as training_scope:
-    with GetPower() as training_scope:
+
+    from jpwr.ctxmgr import get_power
+    # from jpwr.ctxmgr import get_power as GetPower
+    method_list = []
+    if os.getenv("ACCELERATOR") == "MI250":
+      from jpwr.gpu.rocm import power
+      method_list.append(power())
+      gpu_name = "AMD"
+    else:
+      # Energy measurement using nvidia-smi
+      from jpwr.gpu.pynvml import power
+      method_list.append(power())
+      gpu_name = "NVIDIA"
+    if os.getenv("ACCELERATOR") in ["GH200", "Jedi"]:
+      from jpwr.sys.gh import power
+      method_list.append(power())
+      
+    with get_power(method_list, 100) as training_scope:
       loop_start_time = time.perf_counter()
       loop_warmup_start = loop_start_time
       loop_warmup_start_time = datetime.datetime.now()
@@ -2604,25 +2617,37 @@ class BenchmarkCNN(object):
     mlperf.logger.log(key=mlperf.tags.RUN_STOP, value={'success': success})
     mlperf.logger.log(key=mlperf.tags.RUN_FINAL)
     
+    ##################################
+    #        ENERGY STATS HERE       #
+    ##################################
+
     log_fn('-' * 64)  
-    
-    if gpu_name == "NVIDIA":
-        training_scope.df.to_csv('power_nvidia.csv')
-        print(f"Energy-per-GPU-list integrated(Wh): {training_scope.energy()}")
-        
-    else:
-        ### AMD
-        training_scope.df.to_csv('power_amd.csv')
-        energy_int,energy_cnt = training_scope.energy()
-        print(f"Energy-per-GPU-list integrated(Wh): {energy_int}")
-        print(f"Energy-per-GPU-list from counter(Wh): {energy_cnt}")
-        
-    # energy_df, energy_additional = training_scope.energy()
-    # for k,v in energy_additional.items():
-    #     v.to_csv(f"{k}_{gpu_name}.csv")
-    # energy_df.to_csv(f'energy_{gpu_name}.csv')
-    # training_scope.df.to_csv(f'power_{gpu_name}.csv')
-    # print(f"Energy {gpu_name}: \n {energy_df}")
+
+    energy_df, additional_data = training_scope.energy()
+    import platform
+    nodename  = platform.node()
+    rankid    = int(os.getenv("SLURM_PROCID"))
+    ranks     = int(os.getenv("SLURM_NTASKS"))
+    accelerator = os.getenv("ACCELERATOR")
+    power_file_base = f"{accelerator}_power.csv"
+    power_file = power_file_base.replace("csv", f"{rankid}.csv")
+    training_scope.df["nodename"] = nodename
+    training_scope.df["rank"] = rankid
+    if not os.path.exists(power_file):
+        training_scope.df.to_csv(power_file)
+    energy_df["nodename"] = nodename
+    energy_df["rank"] = rankid
+    energy_file = power_file.replace("csv", f"energy.csv")
+    if not os.path.exists(energy_file):
+        energy_df.to_csv(energy_file)
+    print(f"Host: {nodename}")
+    print(f"Energy-per-GPU-list integrated(Wh): \n{energy_df.to_string()}")
+    for k,v in additional_data.items():
+        additional_path = power_file.replace("csv", f"{slugify(k)}.csv")
+        print(f"Writing {k} df to {additional_path}")
+        v.T.to_csv(additional_path)
+        print(f"Energy-per-GPU-list from {k}(Wh): {v.to_string()}")
+
     log_fn('-' * 64)
     
     return stats
