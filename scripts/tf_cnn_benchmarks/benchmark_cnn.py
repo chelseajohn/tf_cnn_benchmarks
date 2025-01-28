@@ -2421,7 +2421,7 @@ class BenchmarkCNN(object):
     from jpwr.ctxmgr import get_power
     # from jpwr.ctxmgr import get_power as GetPower
     method_list = []
-    if os.getenv("ACCELERATOR") == "MI250":
+    if os.getenv("ACCELERATOR") in ["MI250", "MI300X"]:
       from jpwr.gpu.rocm import power
       method_list.append(power())
       gpu_name = "AMD"
